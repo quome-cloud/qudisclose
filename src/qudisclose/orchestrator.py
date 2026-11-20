@@ -236,6 +236,7 @@ class Orchestrator:
             sandbox = make_sandbox(report.id, repo_path=repo_cfg.path, config=self.config.sandbox)
             sandbox.create()
             revision = sandbox.revision()          # VSLA-F-2: the subject revision is the baseline, before any test is added
+            self.store.put_artifact(report.id, "subject_revision", {"sha": revision})   # the publisher branches the fix from here
             if self.config.vsla.enabled and report.submission.attestation:
                 self._vsla_receipt(report, repo_cfg)   # VSLA-P-3/P-4: re-execute the finder's reproduction in our own sandbox, sign the receipt
             repro_f = self._stages.submit(self._audited, "reproducer", report.id, lambda: self.reproducer.run(report, sandbox)) \
@@ -279,7 +280,7 @@ class Orchestrator:
             patch = self._patch_loop(report, repo_cfg, repro, sandbox)
             if patch is None:
                 return self._finish(report, Status.FAILED, "no_verified_patch", sandbox, detail={"reproduced": True})
-            self.store.put_artifact(report.id, "patch", patch)
+            self._save_patch(report, patch)
 
             self._checkpoint(report)
             self._transition(report, Status.REVIEWING)
@@ -293,7 +294,7 @@ class Orchestrator:
                 patch = self._patch_loop(report, repo_cfg, repro, sandbox, feedback=verdict.required_changes + verdict.suspicious)
                 if patch is None:
                     return self._finish(report, Status.FAILED, "no_verified_patch_after_review", sandbox, detail={"reproduced": True})
-                self.store.put_artifact(report.id, "patch", patch)
+                self._save_patch(report, patch)
                 verdict = self._audited("reviewer", report.id, lambda: self.reviewer.run(report, patch))
                 self.store.put_artifact(report.id, "review", verdict)
                 self.store.add_event(report.id, "review_done", "reviewer", approved=verdict.approved, required_changes=verdict.required_changes, round=rounds)
@@ -346,6 +347,12 @@ class Orchestrator:
             sandbox.destroy(); sandbox.create(); sandbox.write(repro.test_path, repro.test_source); sandbox.commit("qudisclose: reproduction test")
         return None
 
+    def _save_patch(self, report: Report, patch: PatchResult) -> None:
+        """The patch, and the verified file contents the publisher pushes (None = the diff deletes the file). The contents
+        are a separate artifact: they would not survive the PatchResult round trip through the store."""
+        self.store.put_artifact(report.id, "patch", patch)
+        self.store.put_artifact(report.id, "patch_files", getattr(patch, "_files", {}))
+
     def _authoritative_diff(self, sandbox: SandboxBackend, proposal: PatchProposal) -> PatchProposal:
         """Trust the git-generated diff of the patcher's OWN sandbox edits over the model's hand-written
         `diff`. Models (even strong ones) routinely emit unified diffs with drifted context/line numbers
@@ -373,12 +380,12 @@ class Orchestrator:
             clean.write(repro.test_path, repro.test_source)  # after apply: the diff may legitimately not include the test
             r1 = clean.run(shlex.split(repro.command))
             r2 = clean.run(shlex.split(repo_cfg.test_command))
-            files = {}
-            for path in proposal.files_touched:
+            files: dict[str, str | None] = {}
+            for path in diff_paths(proposal.diff):
                 try:
                     files[path] = clean.read(path)
                 except Exception:
-                    pass
+                    files[path] = None          # deleted (or renamed away) by the diff
             res = PatchResult(proposal=proposal, reproduction_passes=r1.ok, suite_passes=r2.ok, attempts=attempt,
                               output_excerpt=(f"[reproduction] {r1.excerpt(1500)}\n[suite] {r2.excerpt(2000)}")[-4000:])
             object.__setattr__(res, "_files", files)
@@ -424,18 +431,37 @@ class Orchestrator:
                 attestations["receipt"] = arts["vsla_receipt"]
             import inspect
             params = inspect.signature(self.publisher.publish).parameters
-            extra = {"attestations": attestations or None} if ("attestations" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())) else {}
+            offered = {"attestations": attestations or None, "files": arts.get("patch_files"),
+                       "base_revision": (arts.get("subject_revision") or {}).get("sha")}
+            any_kw = any(p.kind is p.VAR_KEYWORD for p in params.values())
+            extra = {k: v for k, v in offered.items() if k in params or any_kw}
             result = self.publisher.publish(report, plan, patch, holder=f"release-agent:{report.id}", **extra)
         except PermissionError as exc:
             self.store.add_event(report.id, "awaiting_human_approval", ACTOR, reason=str(exc))
             self.audit.record(actor=ACTOR, action="release.blocked", input={}, output={"reason": str(exc)}, report_id=report.id)
             return report
-        self.store.add_event(report.id, "published", "release", pr_url=result.pr_url, advisory_url=result.advisory_url)
+        self.store.add_event(report.id, "published", "release", pr_url=result.pr_url, advisory_url=result.advisory_url, disclosed=result.published)
         self.audit.record(actor="release", action="release.published", input={"version": plan.new_version}, output=result.__dict__, report_id=report.id)
-        report.classification = Classification.PUBLIC
-        report.embargo_until = self.clock()
-        self._transition(report, Status.PUBLISHED)
+        if result.published:
+            report.classification = Classification.PUBLIC
+            report.embargo_until = self.clock()
+            self._transition(report, Status.PUBLISHED)
+        else:
+            # the fix is staged privately (GitHub: the draft advisory's temporary private fork) and the case stays
+            # embargoed until a maintainer merges and publishes there and then runs `disclose`
+            self.store.add_event(report.id, "awaiting_disclosure", ACTOR, pr_url=result.pr_url, advisory_url=result.advisory_url)
         return self._finish(report, Status.CLOSED, "published", None)
+
+    def disclose(self, report_id: str, actor: str) -> Report:
+        """Lift the embargo on a case whose fix was staged privately, once the maintainer has published it."""
+        r = self._must(report_id)
+        if r.classification != Classification.PUBLIC:
+            r.classification = Classification.PUBLIC
+            r.embargo_until = self.clock()
+            self.store.save_report(r)
+            self.store.add_event(report_id, "disclosed", actor)
+            self.audit.record(actor=actor, action="case.disclose", input={}, output={"classification": r.classification}, report_id=report_id)
+        return r
 
     def _finish(self, report: Report, status: Status, outcome: str, sandbox: SandboxBackend | None, detail: dict[str, Any] | None = None) -> Report:
         if sandbox is not None:

@@ -336,6 +336,7 @@ uv run qudisclose status rpt_f5b339dd4798   # one case: timeline, every artifact
 uv run qudisclose control pause  rpt_f5b339dd4798 --reason "want eyes on this one"
 uv run qudisclose control resume rpt_f5b339dd4798
 uv run qudisclose control approve rpt_f5b339dd4798   # when policy requires a human for merge/publish
+uv run qudisclose control disclose rpt_f5b339dd4798  # after you publish the advisory on GitHub: lift the embargo
 uv run qudisclose audit --show rpt_f5b339dd4798      # verify the signed hash chain
 ```
 
@@ -353,7 +354,7 @@ chain: OK (ok); 17 entries
 
 Entry 14 is a reporter trying to call `pause_case`. Denials are audited too.
 
-**qudisclose never merges a PR.** The release step opens the pull request and the draft advisory and stops; a maintainer reviews the diff on GitHub and clicks merge. By default (`require_human_for_merge: false`) the PR opens automatically once the patch has passed reproduction, the test suite and review — you see it and merge it. Set the flag to `true` to add a second checkpoint: qudisclose then won't even open the PR until you run `qudisclose control approve <id>`.
+**qudisclose never merges a PR.** The release step creates a draft repository security advisory, opens the pull request inside that advisory's temporary private fork, and stops; a maintainer reviews the diff there, merges it from the advisory and publishes the advisory, then runs `qudisclose control disclose <id>`. The fix never sits in a public PR: on a public repository that would tell everyone about the bug before any user could upgrade. The case stays embargoed until `disclose`. By default (`require_human_for_merge: false`) the PR opens automatically once the patch has passed reproduction, the test suite and review — you see it and merge it. Set the flag to `true` to add a second checkpoint: qudisclose then won't even open the PR until you run `qudisclose control approve <id>`.
 
 A pause takes effect at the next stage boundary; the case parks as `paused` and resumes exactly where it
 stopped. Every case ends in a postmortem, and a case that fails (could not reproduce, no verified patch,

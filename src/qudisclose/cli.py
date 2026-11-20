@@ -227,7 +227,7 @@ def cmd_control(a: argparse.Namespace) -> None:
     orch = _orchestrator(cfg, store, AuditLog(store.db, audit_id))
     actor = f"cli:{os.environ.get('USER', 'operator')}"
     fn = {"pause": lambda: orch.pause(a.report_id, actor, a.reason or ""), "resume": lambda: orch.resume(a.report_id, actor),
-          "approve": lambda: orch.approve_release(a.report_id, actor)}[a.action]
+          "approve": lambda: orch.approve_release(a.report_id, actor), "disclose": lambda: orch.disclose(a.report_id, actor)}[a.action]
     r = fn()
     print(f"{r.id} -> {r.status} (paused={r.paused})")
 
@@ -462,8 +462,8 @@ def main(argv: list[str] | None = None) -> None:
     s = sp.add_parser("dashboard", help="serve a read-only web view of the store"); s.set_defaults(fn=cmd_dashboard)
     s.add_argument("--host", default="127.0.0.1"); s.add_argument("--port", type=int, default=8780)
     s = sp.add_parser("audit", help="verify the audit chain"); s.set_defaults(fn=cmd_audit); s.add_argument("--show", metavar="REPORT_ID|all")
-    s = sp.add_parser("control", help="pause / resume / approve a case"); s.set_defaults(fn=cmd_control)
-    s.add_argument("action", choices=["pause", "resume", "approve"]); s.add_argument("report_id"); s.add_argument("--reason")
+    s = sp.add_parser("control", help="pause / resume / approve / disclose a case"); s.set_defaults(fn=cmd_control)
+    s.add_argument("action", choices=["pause", "resume", "approve", "disclose"]); s.add_argument("report_id"); s.add_argument("--reason")
     s = sp.add_parser("submit", help="submit a report as a reporter agent (client side)"); s.set_defaults(fn=cmd_submit)
     s.add_argument("file", help="JSON matching ReportSubmission"); s.add_argument("--url", default="http://127.0.0.1:8765/mcp")
     s.add_argument("--token", required=True); s.add_argument("--key", required=True, help="reporter identity json"); s.add_argument("--pin", help="pinned catalog fingerprint")

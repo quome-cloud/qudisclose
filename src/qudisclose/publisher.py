@@ -1,5 +1,6 @@
 """Where a verified fix goes. `LocalPublisher` writes everything to an output directory (offline / demo);
-`GitHubPublisher` opens the PR and the repository security advisory using short-lived brokered leases."""
+`GitHubPublisher` stages the fix privately beside a draft repository security advisory, using short-lived brokered
+leases, and leaves disclosure to the maintainer."""
 
 from __future__ import annotations
 
@@ -44,7 +45,10 @@ class LocalPublisher:
 
 
 class GitHubPublisher:
-    """Creates a branch + PR and a repository security advisory. Each step uses its own lease."""
+    """Creates a draft repository security advisory, the advisory's temporary private fork, and a branch + PR inside that
+    fork. Nothing about the bug reaches the public repository: an ordinary PR there would disclose it to everyone before
+    any user could upgrade. The maintainer merges in the advisory and publishes it on GitHub, then runs `disclose`.
+    Each step uses its own lease."""
 
     def __init__(self, broker: CredentialBroker, api: str = "https://api.github.com") -> None:
         self.broker, self.api = broker, api
@@ -54,8 +58,13 @@ class GitHubPublisher:
             "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
 
     def publish(self, report: Report, plan: ReleasePlan, patch: PatchResult, *, holder: str,
-                attestations: dict[str, Any] | None = None) -> PublishResult:
+                attestations: dict[str, Any] | None = None, files: dict[str, str | None] | None = None,
+                base_revision: str | None = None) -> PublishResult:
+        """`files` are the verified contents of every path the diff touches (None = deleted) and `base_revision` the
+        commit they were verified against; the PR branch starts there so it carries exactly the verified change."""
         repo = report.submission.repo
+        if not files or not base_revision:
+            raise ValueError("GitHubPublisher needs the verified files and the revision they were verified against")
         if attestations:
             from qudisclose.vsla.dsse import envelope_payload, statement_digest
             lines = []
@@ -67,28 +76,41 @@ class GitHubPublisher:
             if lines:
                 plan = plan.model_copy(update={"pr_body": plan.pr_body + "\n\n### VSLA attestation\n" + "\n".join(lines)
                                                + "\n\nVerify with `qudisclose verify-attestation` (spec: https://github.com/AAI-Society/vsla)."})
-        pr_lease = self.broker.lease(purpose="pr:create", repo=repo, holder=holder)
-        try:
-            pr_url = self._open_pr(repo, plan, patch, pr_lease.reveal())
-        finally:
-            self.broker.revoke(pr_lease.lease_id)
         adv_lease = self.broker.lease(purpose="advisory:publish", repo=repo, holder=holder)
         try:
-            adv_url = self._create_advisory(repo, plan, adv_lease.reveal())
+            ghsa, adv_url = self._create_advisory(repo, plan, adv_lease.reveal())
+            fork = self._private_fork(repo, ghsa, adv_lease.reveal())
         finally:
             self.broker.revoke(adv_lease.lease_id)
-        return PublishResult(pr_url=pr_url, advisory_url=adv_url, published=True)
+        pr_lease = self.broker.lease(purpose="pr:create", repo=repo, holder=holder)
+        try:
+            pr_url = self._open_pr(fork, plan, files, base_revision, pr_lease.reveal())
+        finally:
+            self.broker.revoke(pr_lease.lease_id)
+        return PublishResult(pr_url=pr_url, advisory_url=adv_url, published=False)
 
-    def _open_pr(self, repo: str, plan: ReleasePlan, patch: PatchResult, token: str) -> str:
-        """Pushes the diff via the Git data API (no local git credential ever exists) and opens the PR."""
+    def _private_fork(self, repo: str, ghsa: str, token: str) -> str:
+        """The draft advisory's temporary private fork; returns its `owner/name`."""
+        with self._client(token) as c:
+            r = c.post(f"/repos/{repo}/security-advisories/{ghsa}/forks")
+            r.raise_for_status()
+            return str(r.json()["full_name"])
+
+    def _open_pr(self, repo: str, plan: ReleasePlan, files: dict[str, str | None], base_revision: str, token: str) -> str:
+        """Branches from the verified base, writes the verified files through the contents API (no local git credential
+        ever exists) and opens the PR inside `repo`, the private fork. Merging it into the fork's default branch is a
+        3-way merge, so changes made since the base are kept, and a conflict shows up as a conflict."""
         with self._client(token) as c:
             base = c.get(f"/repos/{repo}").json()["default_branch"]
-            head_sha = c.get(f"/repos/{repo}/git/ref/heads/{base}").json()["object"]["sha"]
             branch = f"qudisclose/fix-{plan.advisory.id.lower()}"
-            c.post(f"/repos/{repo}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": head_sha}).raise_for_status()
-            # Apply the diff file-by-file through the contents API.
-            for path, content in _materialize(patch).items():
+            c.post(f"/repos/{repo}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": base_revision}).raise_for_status()
+            for path, content in files.items():
                 existing = c.get(f"/repos/{repo}/contents/{path}", params={"ref": branch})
+                if content is None:
+                    if existing.status_code == 200:
+                        c.request("DELETE", f"/repos/{repo}/contents/{path}", json={"message": f"security: {plan.pr_title}",
+                                  "sha": existing.json()["sha"], "branch": branch}).raise_for_status()
+                    continue
                 body: dict[str, Any] = {"message": f"security: {plan.pr_title}", "content": _b64(content), "branch": branch}
                 if existing.status_code == 200:
                     body["sha"] = existing.json()["sha"]
@@ -97,7 +119,8 @@ class GitHubPublisher:
             pr.raise_for_status()
             return pr.json()["html_url"]
 
-    def _create_advisory(self, repo: str, plan: ReleasePlan, token: str) -> str:
+    def _create_advisory(self, repo: str, plan: ReleasePlan, token: str) -> tuple[str, str]:
+        """A draft repository advisory (the REST API creates advisories as drafts); returns (GHSA id, URL)."""
         a = plan.advisory
         with self._client(token) as c:
             r = c.post(f"/repos/{repo}/security-advisories", json={
@@ -109,7 +132,7 @@ class GitHubPublisher:
                 "credits": [{"login": cr.removeprefix("github:"), "type": "reporter"} for cr in a.credits if cr.startswith("github:")],
             })
             r.raise_for_status()
-            return r.json()["html_url"]
+            return str(r.json()["ghsa_id"]), str(r.json()["html_url"])
 
 
 def _osv(plan: ReleasePlan) -> dict[str, Any]:
@@ -125,7 +148,3 @@ def _b64(s: str) -> str:
     import base64
     return base64.b64encode(s.encode()).decode()
 
-
-def _materialize(patch: PatchResult) -> dict[str, str]:
-    """Final file contents are attached by the orchestrator after verification (see Orchestrator._verify_patch)."""
-    return getattr(patch, "_files", {})  # type: ignore[no-any-return]

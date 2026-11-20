@@ -110,7 +110,7 @@ acknowledges at once and drives six agent roles (triage, reproducer, patcher, re
 against a service-level clock. The design rule is that no stage is believed on a model's word: the orchestrator
 re-runs the reproducing test and requires an assertion failure, applies each patch in a clean worktree and runs
 the suite, and gives the reviewer the report, the diff and the test output but never the patcher's reasoning.
-The system opens a pull request and a draft advisory and stops; a person merges. Around the pipeline sit the
+The system opens a private pull request beside a draft advisory and stops; a person merges. Around the pipeline sit the
 controls that the NSA's 2026 guidance on MCP asks for, each with a test: per-message integrity and replay
 protection, least privilege per tool, short-lived credential leases, distinct non-human identities, a
 hash-chained signed audit log, tool-catalog pinning, untrusted-input handling and sandboxed execution. \qud{}
@@ -317,13 +317,17 @@ that needs no model.}
 \label{tab:roles}
 \end{table}
 
-\paragraph{Release, and the line the system does not cross.} The release step opens a pull request and a draft
-repository advisory, each under its own short-lived credential lease, and stops. \qud{} never merges. Policy can
+\paragraph{Release, and the line the system does not cross.} The release step creates a draft repository
+advisory and opens a pull request inside the advisory's temporary private fork, each under its own short-lived
+credential lease, and stops. The pull request branches from the revision the patch was verified against, so it
+carries exactly the verified change. It is not opened on the public repository: an unmerged security fix in a
+public pull request tells everyone about the bug before any user can upgrade. \qud{} never merges. Policy can
 add a second checkpoint that withholds even the pull request until an operator approves; pausing and resuming a
 case are available as commands and as admin-scoped tools, and a pause takes effect at the next stage boundary.
 
 \paragraph{Embargo.} The embargo is a server-enforced classification rather than a courtesy. It is capped by
-policy (seven days by default) and ends when the fix is published. Until then a reader with a
+policy (seven days by default) and ends when the fix is published: when the maintainer, having merged and
+published the advisory, marks the case disclosed. Until then a reader with a
 \code{report:read} token who is not the reporter or an admin learns that a fix exists and its version, and
 nothing about the bug: titles are withheld in listings and the advisory body is not served.
 
