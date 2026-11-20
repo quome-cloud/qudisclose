@@ -323,7 +323,8 @@ add a second checkpoint that withholds even the pull request until an operator a
 case are available as commands and as admin-scoped tools, and a pause takes effect at the next stage boundary.
 
 \paragraph{Embargo.} The embargo is a server-enforced classification rather than a courtesy. It is capped by
-policy (seven days by default) and ends when the fix is published. Until then a reader with a
+policy (seven days by default from any one request; a later request may extend it again) and ends when the fix
+is published. The cap is a date on the case: reaching it does not publish anything by itself. Until then a reader with a
 \code{report:read} token who is not the reporter or an admin learns that a fix exists and its version, and
 nothing about the bug: titles are withheld in listings and the advisory body is not served.
 
@@ -423,7 +424,8 @@ publication.
 \paragraph{As a platform.} For a statement that a reporter submits, \qud{} checks the signature under the
 pinned reporter key, the schema, the Merkle root against the supplied leaves and the subject against the
 report, and then re-executes the reproduction at the subject revision in a sandbox it controls, with its own
-classifier and a check that the test exercised the package the report names. For a Patch statement it applies
+classifier and a check that the test exercised the subject package, named by the platform's own configuration
+for the repository rather than by the report. For a Patch statement it applies
 the diff, runs the reproduction and the suite, computes the scope of the diff, and runs its own review on a
 model family that differs from every patcher in the statement; the finder's own review does not count. It signs
 a DSSE receipt in every case, including the cases where it could not or would not run. It checks the finder's
@@ -448,7 +450,10 @@ It does not open a pull request by itself: the lane and the human gates in the p
 
 \paragraph{Interoperability.} A test suite holds the implementation byte-compatible with the \vsla{} reference
 verifier: canonical JSON, receipts and ledger entries, the same Merkle and ledger roots, and the same level on
-the same inputs, in both directions.
+the same inputs, in both directions. The suite runs against a checkout of the reference repository beside this
+one, at whatever revision that checkout is, and skips when there is none; compatibility is therefore with
+specification v1.0 revision~3 as checked on the author's machine, and has to be re-established when either
+side changes.
 
 % ------------------------------------------------------------------ 7
 \section{Implementation and what has been shown}

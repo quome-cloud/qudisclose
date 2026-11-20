@@ -180,7 +180,7 @@ POSTMORTEM
 audit chain: OK (8 entries)
 ```
 
-Then `uv run pytest -q` runs the suite (91 tests; the Postgres parity test skips when no local Postgres is reachable), including the paths you hope never to see: a patch that fails
+Then `uv run pytest -q` runs the suite (127 tests; the Postgres parity test skips when no local Postgres is reachable, and the five interoperability tests skip unless a checkout of AAI-Society/vsla sits beside this repository), including the paths you hope never to see: a patch that fails
 verification three times, a reviewer that rejects and sends the patcher back, a human pausing mid-triage, a
 report that tries to prompt-inject the agents.
 
