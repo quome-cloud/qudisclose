@@ -294,9 +294,12 @@ collection or import error. The patcher's output is a diff. The orchestrator app
 runs both the reproducing test and the project's suite; a patch that does not pass is returned to the patcher
 with the output, up to three attempts.
 
-\paragraph{Review without the author's voice.} The reviewer receives the report, the diff and the test output.
+\paragraph{Review without the author's summary.} The reviewer receives the report, the diff and the test output.
 It does not receive the patcher's summary or reasoning, so it cannot be persuaded by them. Its verdict is
-binding: a rejection sends the case back with required changes.
+binding: a rejection sends the case back with required changes. Two limits apply. The diff is itself the
+patcher's writing, and its comments and names can argue for the change, so withholding the summary removes
+the patcher's pitch but not its voice. And by default the reviewer runs on the same model as the patcher; a
+deployment can configure a different provider and model for it, and the Patch statement records which.
 
 \begin{table}[t]
 \centering\small
@@ -424,8 +427,13 @@ publication.
 pinned reporter key, the schema, the Merkle root against the supplied leaves and the subject against the
 report, and then re-executes the reproduction at the subject revision in a sandbox it controls, with its own
 classifier and a check that the test exercised the package the report names. For a Patch statement it applies
-the diff, runs the reproduction and the suite, computes the scope of the diff, and runs its own review on a
-model family that differs from every patcher in the statement; the finder's own review does not count. It signs
+the diff, runs the reproduction and the suite, computes the scope of the diff, and runs its own review; the
+finder's own review does not count. The receipt records whether the reviewer's model family differs from every
+patcher the statement names, and \vsla{} requires that it does before the Patch track reaches \lvl{2}. \qud{}
+does not choose a different family for itself: the reviewer is whatever the deployment configured, so a
+deployment that wants submitted patches to reach \lvl{2} must configure a reviewer outside the families it
+expects to see. The patcher families come from the finder's own model bill of materials, which the platform
+cannot check for a hosted model. It signs
 a DSSE receipt in every case, including the cases where it could not or would not run. It checks the finder's
 ledger entry by entry under the countersigners it has pinned, remembers the last root it saw, and records a
 fork when a later history does not extend it. When the case closes it countersigns the outcome into the
