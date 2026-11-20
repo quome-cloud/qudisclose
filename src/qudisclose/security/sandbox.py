@@ -35,6 +35,7 @@ and the spec say so."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import resource
@@ -50,7 +51,29 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from qudisclose.config import SandboxConfig
 
+log = logging.getLogger(__name__)
+
 SAFE_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "TERM", "HOME", "TMPDIR", "PYTHONDONTWRITEBYTECODE")
+
+_NETNS_PERMITTED: dict[str, bool] = {}
+
+
+def _netns_permitted(unshare: str) -> bool:
+    """Whether this host lets the platform user create a network namespace. `unshare` can be installed yet forbidden:
+    Ubuntu 24.04 ships kernel.apparmor_restrict_unprivileged_userns=1, where `unshare -n` fails with EPERM. A definite
+    answer is remembered per binary; a probe that times out on a loaded host is not, so it cannot disable the namespace."""
+    if unshare not in _NETNS_PERMITTED:
+        try:
+            ok = subprocess.run([unshare, "-n", "--", "true"], capture_output=True, timeout=10).returncode == 0
+        except subprocess.TimeoutExpired:
+            return False
+        except OSError:
+            ok = False
+        if not ok:
+            log.warning("%s cannot create a network namespace on this host; the process sandbox cuts egress by proxy "
+                        "variables only (netns: none). Use the quome backend for untrusted code.", unshare)
+        _NETNS_PERMITTED[unshare] = ok
+    return _NETNS_PERMITTED[unshare]
 
 
 @dataclass
@@ -151,7 +174,8 @@ class LocalSandbox:
     def netfilter() -> str:
         """How network egress is cut for sandboxed commands on this host: a network namespace (`unshare -n`, Linux), the
         macOS `sandbox-exec` profile `(deny network*)`, or nothing but proxy poisoning (`none`)."""
-        if sys.platform.startswith("linux") and shutil.which("unshare"):
+        unshare = shutil.which("unshare")
+        if sys.platform.startswith("linux") and unshare and _netns_permitted(unshare):
             return "unshare"
         if sys.platform == "darwin" and os.path.exists("/usr/bin/sandbox-exec"):
             return "sandbox-exec"
@@ -418,6 +442,15 @@ def run_classified(sandbox: "SandboxBackend", command: str, *, subject: str | No
         c.touched_method, c.imported = method, touched_names
         c.touched_subject = _touches(touched_names, method, subject, extra_files or [])
     return r, c
+
+
+def sandbox_fault(sandbox: "SandboxBackend") -> str | None:
+    """Why the sandbox itself cannot run a command, or None when it can. Tells a platform failure apart from a test that
+    crashed its own runner: only the first is the platform's fault (VSLA-P-4 `environment-error`, VSLA-P-6 no entry)."""
+    r = sandbox.run(["true"], timeout=60)
+    if r.returncode == 0:
+        return None
+    return f"the platform sandbox cannot run a command (exit {r.returncode}): {r.stderr.strip()[-200:]}"
 
 
 def _touches(names: list[str], method: str, subject: str | None, extra_files: list[str]) -> bool:

@@ -385,6 +385,21 @@ def test_reexecution_at_unavailable_revision_is_environment_error(tmp_path, repo
     assert ver["verified"] == 1 and ver["pillars"]["evidence"]["failed"] == "E7"
 
 
+def test_a_sandbox_that_cannot_run_anything_is_environment_error_not_a_false_positive(tmp_path, repo, monkeypatch):
+    """VSLA-P-4/P-6: when the platform's own sandbox fails every command (exit 1, as a forbidden `unshare -n` does), the
+    receipt is `environment-error`, not `matched` on the exit code alone, and no outcome is written against the finder."""
+    cfg, store, orch = _platform(tmp_path, repo, "platform")
+    forch, bundle, cs = _finder_bundle(tmp_path, repo, orch)
+    from qudisclose.security.sandbox import SandboxResult
+    monkeypatch.setattr(LocalSandbox, "run", lambda self, argv, *, timeout=None: SandboxResult(
+        returncode=1, stdout="", stderr="unshare: unshare failed: Operation not permitted"))
+    rep = _submit(orch, forch, bundle)
+    orch.run_case(rep.id)
+    rx = envelope_payload(store.get_artifact(rep.id, "vsla_receipt"))["reexecution"]
+    assert rx["status"] == "environment-error" and "cannot run a command" in rx["reason"]
+    assert orch.ledger.own_entries(_fid(forch)) == []
+
+
 def test_admission_deferral_issues_not_attempted_receipt_and_slow_lane(tmp_path, repo):
     """VSLA-P-12: over the admission limit the platform defers re-execution, still signs a receipt (not-attempted), routes
     the case to the slow lane and still handles it."""

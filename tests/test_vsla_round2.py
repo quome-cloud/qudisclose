@@ -357,6 +357,25 @@ def test_process_sandbox_denies_network_on_macos(repo):
         sb.destroy()
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux netfilter only")
+def test_unshare_that_cannot_create_a_namespace_is_not_claimed(repo, tmp_path, monkeypatch):
+    """VSLA-P-11: where `unshare` exists but the host forbids unprivileged namespaces (Ubuntu 24.04's default
+    kernel.apparmor_restrict_unprivileged_userns=1), the sandbox must neither claim a namespace nor wrap every command in one
+    that fails."""
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    (shim / "unshare").write_text("#!/bin/sh\necho 'unshare: unshare failed: Operation not permitted' >&2\nexit 1\n")
+    (shim / "unshare").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
+    sb = LocalSandbox(repo, case_id="netns")
+    assert sb.netfilter() == "none" and sb.isolation_detail()["netns"] == "none"
+    sb.create()
+    try:
+        assert sb.run(["python", "-c", "pass"]).returncode == 0
+    finally:
+        sb.destroy()
+
+
 # ----------------------------------------------------------------------------- scope (VSLA-F-18)
 
 def test_scope_sees_renames_modes_binaries_and_submodules():

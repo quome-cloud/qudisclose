@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +18,17 @@ import pytest
 from qudisclose.config import SandboxConfig
 from qudisclose.security.quome_sandbox import QuomeSandbox
 from qudisclose.security.sandbox import LocalSandbox, SandboxBackend, make_sandbox
+
+
+@pytest.fixture(autouse=True)
+def _quome_sdk(monkeypatch):
+    """The fake sandbox stands in for the SDK client, but `QuomeSandbox._sh` still imports the SDK's exception type. Without
+    the optional `quome` extra, stub that one name so the contract tests run instead of erroring on import."""
+    try:
+        import quome  # noqa: F401
+    except ModuleNotFoundError:
+        stub = types.SimpleNamespace(SandboxNotRunningError=type("SandboxNotRunningError", (Exception,), {}))
+        monkeypatch.setitem(sys.modules, "quome", stub)
 
 
 # --------------------------------------------------------------------------- factory

@@ -36,7 +36,7 @@ from qudisclose.models import (
 )
 from qudisclose.publisher import LocalPublisher, Publisher
 from qudisclose.security import AuditLog, CredentialBroker, Identity, InjectionScanner, SandboxBackend, make_sandbox
-from qudisclose.security.sandbox import run_classified
+from qudisclose.security.sandbox import run_classified, sandbox_fault
 from qudisclose.store import Store
 from qudisclose.vsla import Attestor, Ledger, MBOMEntry, RecordingProvider, TranscriptRecorder, Verifier, make_receipt
 from qudisclose.vsla.attest import diff_paths, harness_digest, iso, model_family, sandbox_digest, sandbox_isolation, scope_of
@@ -396,9 +396,11 @@ class Orchestrator:
         r, c = run_classified(sandbox, repro.command, subject=subject, extra_files=extra_files)
         finished = self.clock()
         sec = c.security_failure and r.returncode == 1 and not r.timed_out
+        fault = sandbox_fault(sandbox) if c.collected == 0 and not r.timed_out else None
         return {"ok": sec, "exit": r.returncode, "timed_out": r.timed_out, "security_failure": sec, "reason": c.reason,
                 "output": r.excerpt(), "started_at": started, "finished_at": finished, "classification": c.to_dict(),
-                "touched_subject": c.touched_subject, "touched_method": c.touched_method, "touched_means": c.touched_means}
+                "touched_subject": c.touched_subject, "touched_method": c.touched_method, "touched_means": c.touched_means,
+                "sandbox_fault": fault}
 
     def _test_fails(self, sandbox: SandboxBackend, repro: ReproductionResult) -> bool:
         return self._rerun(sandbox, repro)["ok"]
@@ -740,6 +742,8 @@ class Orchestrator:
                        outputDigest=digest(r["output"]), classifier=r["classification"])
             if r["timed_out"]:
                 return {**out, "status": "timeout"}
+            if r["sandbox_fault"]:
+                return {**out, "status": "environment-error", "reason": r["sandbox_fault"]}
             expected = int((pred.get("reproduction") or {}).get("observedExit", 1))
             if track != "patch":
                 return {**out, "status": "matched" if r["exit"] == expected else "mismatched"}
@@ -822,8 +826,8 @@ class Orchestrator:
                 else:
                     why = (rx_body.get("classifier") or {}).get("reason") or "not an assertion failure in a collected test"
                     entries.append(("finding", "false-positive", f"the finder's reproduction did not fail by assertion at the subject revision: {why}"))
-            elif rr.get("timed_out") or cls.get("errors") or rr.get("exit") not in (0, 1):
-                skip_reason = f"reproduction could not be executed in the platform sandbox ({rr.get('reason')}); no outcome recorded"
+            elif rr.get("timed_out") or rr.get("sandbox_fault") or cls.get("errors") or rr.get("exit") not in (0, 1):
+                skip_reason = f"reproduction could not be executed in the platform sandbox ({rr.get('sandbox_fault') or rr.get('reason')}); no outcome recorded"
             else:
                 entries.append(("finding", "false-positive", f"reproduction did not fail by assertion on the vulnerable tree: {rr.get('reason')}"))
         elif reproduced:
