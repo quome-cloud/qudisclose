@@ -144,3 +144,60 @@ def test_diff_commit_and_apply_still_work(repo: Path) -> None:
         assert (repo / "mod.py").read_text() == "x = 2\n"
     finally:
         sb.destroy()
+
+
+# ----------------------------------------------------------------------------- the repository is read-only to a case
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file() and not p.is_symlink()}
+
+
+def test_a_case_cannot_write_to_the_repository_by_absolute_path(repo: Path) -> None:
+    """A test runs as the platform's uid, so nothing but the sandbox stops it writing a hook into the repository's own
+    `.git/hooks` for the operator's next `git checkout` to run."""
+    sb = LocalSandbox(repo, case_id="ro")
+    if sb.repo_guard() == "none":
+        pytest.skip("no way to make the repository read-only to a case on this host")
+    before = _snapshot(repo)
+    sb.create()
+    try:
+        sb.write("evil.py", textwrap.dedent(f"""
+            import os, pathlib
+            repo = pathlib.Path({str(repo)!r})
+            alt = pathlib.Path(open(".git/objects/info/alternates").read().strip()).parent
+            assert alt.resolve() == (repo / ".git").resolve()
+            tried = 0
+            def attempt(fn):
+                global tried
+                tried += 1
+                try:
+                    fn()
+                except OSError:
+                    pass
+            hook = repo / ".git" / "hooks" / "post-checkout"
+            attempt(lambda: (hook.parent.mkdir(exist_ok=True), hook.write_text("#!/bin/sh\\necho pwned\\n"), hook.chmod(0o755)))
+            attempt(lambda: (repo / ".git" / "config").open("a").write("[core]\\n\\tfsmonitor = sh -c 'echo pwned'\\n"))
+            attempt(lambda: (repo / "mod.py").write_text("x = 'pwned'\\n"))
+            attempt(lambda: (repo / "new.py").write_text("pwned\\n"))
+            attempt(lambda: (os.link(repo / ".git" / "config", "hard"), open("hard", "a").write("[x]\\n")))
+            attempt(lambda: os.rename(repo / "mod.py", "stolen.py"))
+            attempt(lambda: os.unlink(repo / "mod.py"))
+            for p in pathlib.Path("/proc").glob("[0-9]*/root"):          # Linux: another process's view of the filesystem
+                attempt(lambda p=p: (p / str(repo).lstrip("/") / "viaproc.py").write_text("pwned\\n"))
+            pathlib.Path("inside.txt").write_text(str(tried))
+        """))
+        r = sb.run([sys.executable, "evil.py"])
+        assert r.ok, r.stdout + r.stderr
+        assert int(sb.read("inside.txt")) >= 7            # the script ran to the end, and the case itself is writable
+        assert _snapshot(repo) == before
+        # the platform's own git still works on the case
+        sb.commit("after")
+        assert sb.revision() != _git(repo, "rev-parse", "HEAD")
+    finally:
+        sb.destroy()
+
+
+def test_isolation_detail_says_whether_the_repository_is_read_only(repo: Path) -> None:
+    sb = LocalSandbox(repo, case_id="detail")
+    assert sb.isolation_detail()["repository"] in ("read-only (sandbox-exec)", "writable")
+    assert (sb.isolation_detail()["repository"] == "writable") == (sb.repo_guard() == "none")
