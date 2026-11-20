@@ -416,9 +416,9 @@ bill of materials naming each role's model, family, provider and serving mode, a
 transcript whose first leaf is the measured harness, and the reproduction evidence with the sandbox's isolation
 class. For a self-hosted model the bill of materials carries a digest of the weight file when the operator
 names it, and says \code{unmeasured} otherwise; it never hashes a model name and presents that as a
-measurement. Statements are produced in an embargoed profile, in which test paths, commands and touched files
-appear as digests, and a published profile in plaintext; only the former leaves the platform before
-publication.
+measurement. Statements are produced in an embargoed profile, in which the repository, test paths, commands and
+touched files appear as digests, and a published profile in plaintext; only the former leaves the platform
+before publication. The embargoed profile hides less than it appears to (Section~\ref{sec:limits}).
 
 \paragraph{As a platform.} For a statement that a reporter submits, \qud{} checks the signature under the
 pinned reporter key, the schema, the Merkle root against the supplied leaves and the subject against the
@@ -519,6 +519,13 @@ request shape the SDK documents. Neither is a measurement of quality.
   \item \textbf{Credential leases are short-lived in the process, not at the issuer,} until the broker is backed
   by an issuer that mints short-lived tokens, such as a GitHub App.
   \item \textbf{Default reporter tokens are long-lived} (thirty days) and should be shortened in production.
+  \item \textbf{The embargoed profile names its target.} Its subject carries the commit the case ran against in
+  plaintext, and a commit hash identifies its repository by itself. The other digests are unsalted SHA-256 over
+  values an observer can enumerate: the repository URL, the test command, and the list of touched files, which
+  for a typical one- or two-file fix is a search over the repository's paths. An embargoed statement therefore
+  tells whoever sees it which project is affected and, often, which file. Keyed digests, with the key released
+  at publication, and a keyed commit reference would fix this; they belong in the \vsla{} profile definition.
+  Until then an embargoed statement should be shared only with parties who may know the target.
   \item \textbf{The host is trusted.} A compromised host or operator defeats the audit chain and the platform
   key. \vsla{} \lvl{3} is the framework's answer and \qud{} does not yet verify hardware attestation.
   \item \textbf{One language ecosystem has been exercised.} The demo and tests use a Python package and
