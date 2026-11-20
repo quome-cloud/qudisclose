@@ -153,5 +153,4 @@ def test_webhook_intake_route(env):
     status, out = handle_webhook(orch, src, sender="nobody", body=body, headers={"x-qud-signature": sig, "x-qud-timestamp": ts})
     assert status == 401
     orch.wait_all()
-    assert store.get_report(out.get("report_id", "")) is None or True
     assert any(e["action"] == "webhook.rejected" for e in audit.entries())

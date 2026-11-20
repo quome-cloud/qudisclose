@@ -9,3 +9,9 @@ keys/
 dist/
 out/
 .qudisclose-sandboxes/
+
+# Gas Town (added by gt)
+.runtime/
+.claude/
+.logs/
+state.json
