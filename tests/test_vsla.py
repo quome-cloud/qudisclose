@@ -654,3 +654,17 @@ def test_cli_verify_attestation(env, tmp_path, capsys):
     checks = {c["id"]: c for c in out["checks"]}
     assert all(checks[i]["ok"] for i in ("E1", "E2", "E3", "E4", "E5", "E6", "I1", "N1", "N2")) and not checks["E7"]["ok"] and not checks["I4"]["ok"]
     assert checks["E5"]["kind"] == "structural" and checks["E6"]["kind"] == "structural" and checks["E2"]["kind"] == "external"
+
+
+def test_submitted_patch_that_stops_the_tests_running_does_not_match(tmp_path, repo):
+    """VSLA-P-4, Patch track: a submitted diff that only adds a pytest.ini with `--collect-only` exits 0 everywhere
+    without running a test. The platform's re-execution must not record reproductionPasses or suitePasses for it."""
+    cfg, store, orch = _platform(tmp_path, repo, "platform", reviewer_provider=demo_provider())
+    forch, bundle, _ = _finder_bundle(tmp_path, repo, orch, track="patch")
+    bundle["patch"]["diff"] = ("diff --git a/pytest.ini b/pytest.ini\nnew file mode 100644\n--- /dev/null\n+++ b/pytest.ini\n"
+                               "@@ -0,0 +1,2 @@\n+[pytest]\n+addopts = --collect-only -q\n")
+    rep = _submit(orch, forch, bundle)
+    orch.run_case(rep.id)
+    rx = envelope_payload(store.get_artifact(rep.id, "vsla_receipt"))["reexecution"]
+    assert rx["applied"], rx
+    assert rx["status"] == "mismatched" and not rx["reproductionPasses"] and not rx["suitePasses"], rx

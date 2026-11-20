@@ -292,7 +292,10 @@ system is meant to save.
 vulnerable tree and accepts it only if it fails, and fails as an assertion in the test rather than as a
 collection or import error. The patcher's output is a diff. The orchestrator applies it in a clean worktree and
 runs both the reproducing test and the project's suite; a patch that does not pass is returned to the patcher
-with the output, up to three attempts.
+with the output, up to three attempts. Passing is read from the runner's per-test report, not from the exit code:
+the reproducing test must run and pass, and every suite test that passed before the diff must still run and
+pass. A diff that stops tests from running (a runner option such as \code{--collect-only}, or a deleted or
+skipped test) exits zero and would otherwise count as a fix.
 
 \paragraph{Review without the author's voice.} The reviewer receives the report, the diff and the test output.
 It does not receive the patcher's summary or reasoning, so it cannot be persuaded by them. Its verdict is
@@ -471,7 +474,7 @@ attack found against the verifier is a failing test before it is a fix.
 \toprule
 Area & What the tests establish \\
 \midrule
-Pipeline & end-to-end success; retry and failure after three unverified patches; reviewer rejection; pause and resume; human gates; injection flagged and wrapped \\
+Pipeline & end-to-end success; retry and failure after three unverified patches; a patch that stops the tests running, or drops a suite test, is not verified; reviewer rejection; pause and resume; human gates; injection flagged and wrapped \\
 Server and client & envelope required on mutating tools; scope denials; catalog and server-key pinning; embargo gating of read tools \\
 Security primitives & envelope and replay; tokens and revocation; broker leases; audit-chain tamper detection; scanner and redactor; rate limiter \\
 Sandbox and inference & backend contract; the virtual-machine backend's interface; the inference bridge failing closed \\

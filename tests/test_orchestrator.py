@@ -188,3 +188,44 @@ def test_qudisclose_never_merges():
     from qudisclose import publisher
 
     assert "/merge" not in inspect.getsource(publisher), "publisher must never auto-merge a PR"
+
+
+_COLLECT_ONLY_INI = "[pytest]\naddopts = --collect-only -q\n"
+
+
+def test_patch_that_stops_the_tests_running_is_not_verified(env):
+    """A diff that only adds a pytest.ini with `--collect-only` makes every run exit 0 without executing a test. Exit
+    code alone would call that a fix; the reproduction must actually run and pass, and the suite must keep every test."""
+    cfg, store, audit, provider, orch = env
+
+    def gaming_patcher(u, t):
+        t["write_file"]("pytest.ini", _COLLECT_ONLY_INI)
+        return dict(summary="harden", diff=t["current_diff"](), files_touched=["pytest.ini"], risk_notes="")
+
+    provider.scripts["patcher"] = gaming_patcher
+    provider.scripts["reviewer"] = lambda u, t: dict(approved=True, completeness="ok", regressions=[], scope_creep=[], suspicious=[],
+                                                     required_changes=[], rationale="looks fine")    # a reviewer that was fooled
+    rep, _ = orch.intake(new_report(), actor="x")
+    r = orch.run_case(rep.id)
+    kinds = [e.kind for e in store.events(rep.id)]
+    assert r.status == Status.FAILED and "patch_verified" not in kinds, kinds
+    attempts = [e for e in store.events(rep.id) if e.kind == "patch_attempt"]
+    assert attempts and not any(e.data["reproduction_passes"] for e in attempts)
+
+
+def test_patch_that_removes_a_passing_suite_test_is_not_verified(env):
+    """The fix itself is real, but the diff also deletes a suite test that passed before: the suite no longer passes."""
+    cfg, store, audit, provider, orch = env
+    from qudisclose.demo import FIXED_FILES
+
+    def fix_and_drop_a_test(u, t):
+        t["write_file"]("vulnpkg/files.py", FIXED_FILES)
+        src = t["read_file"]("tests/test_files.py")
+        t["write_file"]("tests/test_files.py", src.split("def test_resolve_nested")[0])
+        return dict(summary="fix", diff=t["current_diff"](), files_touched=["vulnpkg/files.py", "tests/test_files.py"], risk_notes="")
+
+    provider.scripts["patcher"] = fix_and_drop_a_test
+    rep, _ = orch.intake(new_report(), actor="x")
+    r = orch.run_case(rep.id)
+    attempts = [e for e in store.events(rep.id) if e.kind == "patch_attempt"]
+    assert r.status == Status.FAILED and attempts and not any(e.data["suite_passes"] for e in attempts)

@@ -15,7 +15,6 @@ import hashlib
 import logging
 import os
 import re
-import shlex
 import threading
 import time
 from collections import deque
@@ -36,7 +35,7 @@ from qudisclose.models import (
 )
 from qudisclose.publisher import LocalPublisher, Publisher
 from qudisclose.security import AuditLog, CredentialBroker, Identity, InjectionScanner, SandboxBackend, make_sandbox
-from qudisclose.security.sandbox import run_classified
+from qudisclose.security.sandbox import run_classified, run_outcomes
 from qudisclose.store import Store
 from qudisclose.vsla import Attestor, Ledger, MBOMEntry, RecordingProvider, TranscriptRecorder, Verifier, make_receipt
 from qudisclose.vsla.attest import diff_paths, harness_digest, iso, model_family, sandbox_digest, sandbox_isolation, scope_of
@@ -366,25 +365,52 @@ class Orchestrator:
         clean = make_sandbox(f"{report.id}-verify", repo_path=repo_cfg.path, config=self.config.sandbox)
         clean.create()
         try:
+            baseline = self._suite_baseline(clean, repo_cfg.test_command)
             applied = clean.apply_diff(proposal.diff) if proposal.diff.strip() else None
             if applied is None or applied.returncode != 0:
                 return PatchResult(proposal=proposal, reproduction_passes=False, suite_passes=False, attempts=attempt,
                                    output_excerpt=("empty diff" if applied is None else f"diff did not apply:\n{applied.excerpt()}")[-4000:])
             clean.write(repro.test_path, repro.test_source)  # after apply: the diff may legitimately not include the test
-            r1 = clean.run(shlex.split(repro.command))
-            r2 = clean.run(shlex.split(repo_cfg.test_command))
+            repro_ok, suite_ok, output, _ = self._patched_runs(clean, repro.command, repo_cfg.test_command, baseline)
             files = {}
             for path in proposal.files_touched:
                 try:
                     files[path] = clean.read(path)
                 except Exception:
                     pass
-            res = PatchResult(proposal=proposal, reproduction_passes=r1.ok, suite_passes=r2.ok, attempts=attempt,
-                              output_excerpt=(f"[reproduction] {r1.excerpt(1500)}\n[suite] {r2.excerpt(2000)}")[-4000:])
+            res = PatchResult(proposal=proposal, reproduction_passes=repro_ok, suite_passes=suite_ok, attempts=attempt, output_excerpt=output)
             object.__setattr__(res, "_files", files)
             return res
         finally:
             clean.destroy()
+
+    @staticmethod
+    def _suite_baseline(sandbox: SandboxBackend, test_command: str) -> set[str] | None:
+        """The suite tests that pass before the diff is applied; None when the suite command is not pytest."""
+        _, o = run_outcomes(sandbox, test_command)
+        return o.passed() if o.classified else None
+
+    @staticmethod
+    def _patched_runs(sandbox: SandboxBackend, repro_command: str, test_command: str, baseline: set[str] | None) -> tuple[bool, bool, str, bool]:
+        """Run the reproduction and the suite on the patched tree. Exit 0 is not enough: the reproduction must have run
+        at least one test and every test it ran must pass, and every suite test that passed before the diff must still
+        run and pass. Otherwise a diff that stops tests running (`--collect-only` in a runner config, a deleted or skipped
+        test) would verify. A suite command that is not pytest falls back to its exit code."""
+        r1, o1 = run_outcomes(sandbox, repro_command)
+        r2, o2 = run_outcomes(sandbox, test_command)
+        repro_ok = r1.ok and bool(o1.tests) and all(v == "passed" for v in o1.tests.values())  # type: ignore[union-attr]
+        notes = [] if repro_ok else [f"reproduction: {o1.reason if o1.tests is None else 'no test ran, or a test did not pass'}"]
+        if not o2.classified or baseline is None:
+            suite_ok = r2.ok
+        elif o2.tests is None:
+            suite_ok, notes = False, [*notes, f"suite: {o2.reason}"]
+        else:
+            lost = sorted(baseline - o2.passed())
+            suite_ok = r2.ok and not lost
+            if lost:
+                notes.append(f"suite: {len(lost)} test(s) that passed before the diff no longer pass or no longer run: {', '.join(lost[:10])}")
+        head = ("[verification] " + "; ".join(notes) + "\n") if notes else ""
+        return repro_ok, suite_ok, (f"{head}[reproduction] {r1.excerpt(1500)}\n[suite] {r2.excerpt(2000)}")[-4000:], r1.timed_out or r2.timed_out
 
     def _rerun(self, sandbox: SandboxBackend, repro: ReproductionResult, *, subject: str | None = None,
                extra_files: list[str] | None = None) -> dict[str, Any]:
@@ -746,19 +772,19 @@ class Orchestrator:
             # Patch track: the three executions in the clean checkout, the scope, and our own review (VSLA-P-10, F-18)
             if not diff:
                 return {**out, "status": "mismatched", "applied": False, "reproductionPasses": False, "suitePasses": False, "reason": "bundle carries no patch.diff"}
+            baseline = self._suite_baseline(clean, repo_cfg.test_command)
             applied = clean.apply_diff(diff)
             out["applied"] = applied.returncode == 0
             if not out["applied"]:
                 return {**out, "status": "mismatched", "reproductionPasses": False, "suitePasses": False, "reason": f"diff did not apply: {applied.excerpt(300)}"}
             clean.write(test_path, test_source)
-            r1 = clean.run(shlex.split(command))
-            r2 = clean.run(shlex.split(repo_cfg.test_command))
+            repro_ok, suite_ok, output, timed_out = self._patched_runs(clean, command, repo_cfg.test_command, baseline)
             files = diff_paths(diff)
-            out.update(reproductionPasses=r1.ok, suitePasses=r2.ok, scope=scope_of(files, diff))
-            out["review"] = self._platform_review(report, pred, diff, files, r1.ok, r2.ok, (f"[reproduction] {r1.excerpt(1500)}\n[suite] {r2.excerpt(2000)}")[-4000:])
-            if r1.timed_out or r2.timed_out:
+            out.update(reproductionPasses=repro_ok, suitePasses=suite_ok, scope=scope_of(files, diff))
+            out["review"] = self._platform_review(report, pred, diff, files, repro_ok, suite_ok, output)
+            if timed_out:
                 return {**out, "status": "timeout"}
-            return {**out, "status": "matched" if (r1.ok and r2.ok) else "mismatched"}
+            return {**out, "status": "matched" if (repro_ok and suite_ok) else "mismatched"}
         finally:
             clean.destroy()
 

@@ -474,6 +474,55 @@ def run_classified(sandbox: "SandboxBackend", command: str, *, subject: str | No
     return r, c
 
 
+@dataclass
+class Outcomes:
+    """What a pytest run actually executed, per test id, from the runner's junit report. `classified` is False for a
+    command that is not pytest (its exit code is all there is) and `tests` is None when the report is missing or does
+    not agree with pytest's summary line."""
+
+    classified: bool
+    tests: dict[str, str] | None          # "classname::name" -> passed | failed | error | skipped
+    reason: str
+
+    def passed(self) -> set[str]:
+        return {t for t, o in (self.tests or {}).items() if o == "passed"}
+
+
+def run_outcomes(sandbox: "SandboxBackend", command: str, *, timeout: int | None = None) -> tuple[SandboxResult, Outcomes]:
+    """Run a pytest command and report which tests ran and how each ended. Patch verification needs this instead of the
+    exit code: a diff that adds `--collect-only` to the runner's options, or deletes or skips tests, exits 0 too."""
+    argv = shlex.split(command)
+    if not argv or not _is_pytest(argv):
+        r = sandbox.run(argv, timeout=timeout) if argv else SandboxResult(returncode=127, stdout="", stderr="empty command")
+        return r, Outcomes(False, None, "not a pytest command; exit code only")
+    junit_path = f".qud-junit-{secrets.token_hex(8)}.xml"
+    r = sandbox.run([*argv, f"--junitxml={junit_path}"], timeout=timeout)
+    try:
+        junit = sandbox.read(junit_path)
+    except Exception:
+        junit = ""
+    sandbox.run(["rm", "-f", junit_path], timeout=30)
+    if r.timed_out:
+        return r, Outcomes(True, None, "timed out")
+    if not junit:
+        return r, Outcomes(True, None, f"no junit report produced (exit {r.returncode})")
+    import xml.etree.ElementTree as ET
+
+    try:
+        cases = list(ET.fromstring(junit).iter("testcase"))
+    except Exception as exc:
+        return r, Outcomes(True, None, f"junit report unreadable: {exc!r}")
+    tests: dict[str, str] = {}
+    for tc in cases:
+        outcome = next((k for k in ("error", "failure", "skipped") if tc.find(k) is not None), "passed")
+        tests[f"{tc.get('classname', '')}::{tc.get('name', '')}"] = "failed" if outcome == "failure" else outcome
+    summary = _summary_counts(r.stdout)
+    n_passed = sum(1 for o in tests.values() if o == "passed")
+    if summary is None or summary.get("passed", 0) + summary.get("xpassed", 0) != n_passed:
+        return r, Outcomes(True, None, f"junit report ({n_passed} passed) disagrees with pytest's summary {summary}")
+    return r, Outcomes(True, tests, "ok")
+
+
 def _touches(names: list[str], method: str, subject: str | None, extra_files: list[str]) -> bool:
     files = {Path(f).as_posix() for f in extra_files}
     for n in names:
