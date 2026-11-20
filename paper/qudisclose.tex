@@ -410,7 +410,8 @@ virtual-machine backend.
 \end{figure}
 
 \paragraph{As a finder.} When its own re-run of the reproducing test fails by assertion, \qud{} signs a
-\emph{Finding} statement; when a diff has passed reproduction, the suite and review, it signs a \emph{Patch}
+\emph{Finding} statement, before any patch is attempted (Section~\ref{sec:limits} says what that does and does
+not establish); when a diff has passed reproduction, the suite and review, it signs a \emph{Patch}
 statement. Each binds the report digest and the commit the case ran against, an authorisation basis, a model
 bill of materials naming each role's model, family, provider and serving mode, a Merkle root over the
 transcript whose first leaf is the measured harness, and the reproduction evidence with the sandbox's isolation
@@ -508,6 +509,16 @@ request shape the SDK documents. Neither is a measurement of quality.
   projects. We make no claim about the fraction of findings it reproduces, the quality of its patches, or its
   effect on time-to-fix. A partner pilot is the appropriate next step, and the \vsla{} paper describes what
   such a pilot should measure.
+  \item \textbf{A failing test is not a vulnerability.} The reproduction check accepts any test that fails by
+  assertion on the vulnerable tree. A test that asserts something false of correct code (in the limit,
+  \code{assert False}) passes it, and the Finding statement is signed at that point, before any patch is
+  attempted. In the pipeline \code{assert False} then dies at the patch stage, because the orchestrator restores
+  the test before verifying and no diff can make it pass; but the signed Finding statement remains. A subtler
+  test, one that asserts behaviour the code should not have, can instead lead the patcher to change correct
+  code, and only the suite and the reviewer stand against that. The check also runs inside the test's
+  own process, so a hostile test can in principle forge the runner's report. A control run, in which the
+  unchanged test must pass with a candidate fix applied or at a revision before the bug, would close the first
+  gap; the \vsla{} specification would need to require it first.
   \item \textbf{A passing test is not a correct fix.} Verification by code shows that the reproducing test now
   passes and the suite still does. It does not show that the patch is complete, minimal or free of regressions
   the suite does not cover. This is why the system stops at a pull request.
