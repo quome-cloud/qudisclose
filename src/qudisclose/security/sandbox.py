@@ -5,7 +5,9 @@ shared: no hooks, no config, no refs); commands run in a subprocess with a scrub
 rlimits (CPU, memory, file size, process count) and a wall-clock timeout. The platform's own git calls on a case run
 under the same confinement as the test command, with hooks and the user/system git config switched off: whatever a
 test left behind in the checkout is executed, if at all, with the test's privileges and never with the platform's. Network is cut off with
-`unshare -n` when available (Linux); on other platforms we fall back to proxy env poisoning. This backend is
+`unshare -n` when available (Linux); on other platforms we fall back to proxy env poisoning. On macOS the
+repository itself is read-only to everything that runs on a case (`repo_guard`): a test runs as the platform's uid
+and could otherwise write to the repository by absolute path. On Linux it still can; the receipt says which. This backend is
 VSLA isolation class `process` (VSLA-P-11): a development convenience, named as such in every receipt and in the
 policy; a production intake uses the `quome` backend (class `vm`).
 
@@ -62,6 +64,10 @@ SAFE_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "TERM", "HOME", "TMPDIR", "PYTHONDONT
 _GIT_HARDENED = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "gc.auto=0",
                  "-c", "commit.gpgsign=false", "-c", "protocol.allow=never",
                  "-c", "user.name=qudisclose", "-c", "user.email=qudisclose@localhost"]
+
+# macOS: no network, and no writes under the repository except the case itself (a later rule wins in a profile).
+_SEATBELT = ('(version 1)(allow default)(deny network*)'
+             '(deny file-write* (subpath (param "REPO")))(allow file-write* (subpath (param "CASE")))')
 
 
 @dataclass
@@ -137,10 +143,9 @@ class LocalSandbox:
         return self.path
 
     def destroy(self) -> None:
-        legacy_worktree = (self.path / ".git").is_file()       # a case created before cases stopped being worktrees
+        # A case left over from when cases were worktrees leaves a stale registration in the repository; git prunes
+        # those itself, and nothing confined may write to the repository to do it sooner.
         shutil.rmtree(self.path, ignore_errors=True)
-        if legacy_worktree and (self.repo / ".git").exists():
-            self._git("-C", str(self.repo), "worktree", "prune", cwd=self.root)
 
     # -- execution
 
@@ -174,11 +179,31 @@ class LocalSandbox:
             return "sandbox-exec"
         return "none"
 
+    def repo_guard(self) -> str:
+        """How the repository is kept read-only to everything that runs on a case (the test, and the platform's git
+        calls on the case): a `sandbox-exec` write denial (macOS), or `none`. A test runs as the platform's uid, so
+        without this it can write to the repository by absolute path, for example a hook in the repository's own
+        `.git/hooks` for the operator's next `git checkout` to run. Linux has no guard here yet (`none`): it needs a
+        read-only mount in a private mount namespace, and the receipt says `writable` until that exists."""
+        return "sandbox-exec" if self.netfilter() == "sandbox-exec" else "none"
+
+    def _confined(self, argv: list[str]) -> list[str]:
+        """`argv` wrapped in this host's confinement: network cut and, on macOS, the repository read-only with the
+        case itself writable (also when the case lives under the repository)."""
+        nf = self.netfilter()
+        if nf == "unshare":
+            return ["unshare", "-n", "--", *argv]
+        if nf == "sandbox-exec":
+            return ["/usr/bin/sandbox-exec", "-D", f"REPO={self.repo}", "-D", f"CASE={self.path}", "-p", _SEATBELT, *argv]
+        return list(argv)
+
     def isolation_detail(self) -> dict[str, Any]:
         """What this `process`-class sandbox actually enforces, for the receipt (VSLA-P-11): the isolation class is a claim
         a verifier can hold a platform to only if the receipt says what the class meant on that host."""
         return {"netns": self.netfilter(), "rlimits": ["cpu", "fsize"] + (["as", "nproc"] if sys.platform.startswith("linux") else []),
-                "filesystem": "per-case checkout with its own .git; host filesystem readable and writable by the platform uid (process isolation)", "principal": "platform uid"}
+                "filesystem": "per-case checkout with its own .git; host filesystem readable and, outside the repository, writable by the platform uid (process isolation)",
+                "repository": "read-only (sandbox-exec)" if self.repo_guard() == "sandbox-exec" else "writable",
+                "principal": "platform uid"}
 
     def run(self, argv: list[str], *, timeout: int | None = None) -> SandboxResult:
         return self._exec(list(argv), timeout=timeout, keep=200_000)
@@ -186,12 +211,7 @@ class LocalSandbox:
     def _exec(self, argv: list[str], *, timeout: int | None = None, stdin: str | None = None, cwd: Path | None = None,
               env: dict[str, str] | None = None, keep: int | None = None) -> SandboxResult:
         """The one way anything runs on a case: network cut, scrubbed environment, rlimits, wall-clock timeout."""
-        cmd = list(argv)
-        nf = self.netfilter()
-        if nf == "unshare":
-            cmd = ["unshare", "-n", "--", *cmd]
-        elif nf == "sandbox-exec":
-            cmd = ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny network*)", *cmd]
+        cmd = self._confined(list(argv))
         try:
             p = subprocess.run(cmd, cwd=cwd or self.path, env=env or self._env(), capture_output=True, text=True, input=stdin,
                                timeout=timeout or self.timeout, preexec_fn=self._preexec)
