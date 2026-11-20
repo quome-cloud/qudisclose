@@ -1,7 +1,10 @@
 """Execution isolation for the reproducer and patcher agents, and the normative VSLA-F-5 reproduction classifier.
 
-Each case gets its own git worktree; commands run in a subprocess with a scrubbed environment,
-rlimits (CPU, memory, file size, process count) and a wall-clock timeout. Network is cut off with
+Each case gets its own checkout with its own `.git` (objects borrowed read-only from the repository, nothing else
+shared: no hooks, no config, no refs); commands run in a subprocess with a scrubbed environment,
+rlimits (CPU, memory, file size, process count) and a wall-clock timeout. The platform's own git calls on a case run
+under the same confinement as the test command, with hooks and the user/system git config switched off: whatever a
+test left behind in the checkout is executed, if at all, with the test's privileges and never with the platform's. Network is cut off with
 `unshare -n` when available (Linux); on other platforms we fall back to proxy env poisoning. This backend is
 VSLA isolation class `process` (VSLA-P-11): a development convenience, named as such in every receipt and in the
 policy; a production intake uses the `quome` backend (class `vm`).
@@ -51,6 +54,14 @@ if TYPE_CHECKING:
     from qudisclose.config import SandboxConfig
 
 SAFE_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "TERM", "HOME", "TMPDIR", "PYTHONDONTWRITEBYTECODE")
+
+# Every git call the platform makes on a case. A test that ran in the case controls the checkout's `.git/config`,
+# its hooks directory and (HOME is the checkout) `~/.gitconfig`, so: no hooks, no fsmonitor command, no auto-gc, no
+# signing program, and no user or system config (see `_git_env`). These are defence in depth; the boundary is that
+# the call runs confined like the test itself (`LocalSandbox._git`).
+_GIT_HARDENED = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "gc.auto=0",
+                 "-c", "commit.gpgsign=false", "-c", "protocol.allow=never",
+                 "-c", "user.name=qudisclose", "-c", "user.email=qudisclose@localhost"]
 
 
 @dataclass
@@ -106,24 +117,30 @@ class LocalSandbox:
         self.root.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
             self.destroy()
-        is_git = (self.repo / ".git").exists()
-        if is_git:
-            subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "--detach", str(self.path)],
-                           check=True, capture_output=True)
+        if (self.repo / ".git").exists():
+            # Not a worktree: a worktree shares the repository's `.git` (hooks, config), so a test in one case could
+            # plant code there for the platform, the next case or the operator to run. The case gets its own `.git`
+            # and only borrows the repository's objects through `alternates`, which git reads and never executes.
+            head = self._git("-C", str(self.repo), "rev-parse", "--verify", "HEAD", cwd=self.root, check=True).stdout.strip()
+            common = self._git("-C", str(self.repo), "rev-parse", "--git-common-dir", cwd=self.root, check=True).stdout.strip()
+            objects = (self.repo / common).resolve() / "objects"
+            self.path.mkdir()
+            self._git("init", "-q", check=True)
+            (self.path / ".git" / "objects" / "info" / "alternates").write_text(f"{objects}\n")
+            self._git("checkout", "-q", "--detach", head, check=True)
         else:
             shutil.copytree(self.repo, self.path, ignore=shutil.ignore_patterns(".qudisclose-sandboxes", ".venv", "__pycache__"))
             # Baseline commit so `diff` and `apply_diff` work for plain directories too.
-            git = ["git", "-c", "user.name=qudisclose", "-c", "user.email=qudisclose@localhost", "-C", str(self.path)]
-            subprocess.run([*git, "init", "-q"], check=True, capture_output=True)
-            subprocess.run([*git, "add", "-A"], check=True, capture_output=True)
-            subprocess.run([*git, "commit", "-q", "-m", "baseline", "--no-gpg-sign"], check=True, capture_output=True)
+            self._git("init", "-q", check=True)
+            self._git("add", "-A", check=True)
+            self._git("commit", "-q", "-m", "baseline", "--no-verify", "--no-gpg-sign", check=True)
         return self.path
 
     def destroy(self) -> None:
-        if (self.repo / ".git").exists():
-            subprocess.run(["git", "-C", str(self.repo), "worktree", "remove", "--force", str(self.path)],
-                           capture_output=True)
+        legacy_worktree = (self.path / ".git").is_file()       # a case created before cases stopped being worktrees
         shutil.rmtree(self.path, ignore_errors=True)
+        if legacy_worktree and (self.repo / ".git").exists():
+            self._git("-C", str(self.repo), "worktree", "prune", cwd=self.root)
 
     # -- execution
 
@@ -161,9 +178,14 @@ class LocalSandbox:
         """What this `process`-class sandbox actually enforces, for the receipt (VSLA-P-11): the isolation class is a claim
         a verifier can hold a platform to only if the receipt says what the class meant on that host."""
         return {"netns": self.netfilter(), "rlimits": ["cpu", "fsize"] + (["as", "nproc"] if sys.platform.startswith("linux") else []),
-                "filesystem": "worktree; host filesystem readable (process isolation)", "principal": "platform uid"}
+                "filesystem": "per-case checkout with its own .git; host filesystem readable and writable by the platform uid (process isolation)", "principal": "platform uid"}
 
     def run(self, argv: list[str], *, timeout: int | None = None) -> SandboxResult:
+        return self._exec(list(argv), timeout=timeout, keep=200_000)
+
+    def _exec(self, argv: list[str], *, timeout: int | None = None, stdin: str | None = None, cwd: Path | None = None,
+              env: dict[str, str] | None = None, keep: int | None = None) -> SandboxResult:
+        """The one way anything runs on a case: network cut, scrubbed environment, rlimits, wall-clock timeout."""
         cmd = list(argv)
         nf = self.netfilter()
         if nf == "unshare":
@@ -171,12 +193,29 @@ class LocalSandbox:
         elif nf == "sandbox-exec":
             cmd = ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny network*)", *cmd]
         try:
-            p = subprocess.run(cmd, cwd=self.path, env=self._env(), capture_output=True, text=True,
+            p = subprocess.run(cmd, cwd=cwd or self.path, env=env or self._env(), capture_output=True, text=True, input=stdin,
                                timeout=timeout or self.timeout, preexec_fn=self._preexec)
         except subprocess.TimeoutExpired as e:
             return SandboxResult(returncode=-1, stdout=(e.stdout or b"").decode() if isinstance(e.stdout, bytes) else (e.stdout or ""),
                                  stderr="timed out", timed_out=True)
-        return SandboxResult(returncode=p.returncode, stdout=p.stdout[-200_000:], stderr=p.stderr[-200_000:])
+        out, err = (p.stdout, p.stderr) if keep is None else (p.stdout[-keep:], p.stderr[-keep:])
+        return SandboxResult(returncode=p.returncode, stdout=out, stderr=err)
+
+    def _git_env(self) -> dict[str, str]:
+        env = self._env()
+        # HOME is the checkout, so `~/.gitconfig` is test-controlled; the host's own config is not the case's business.
+        env.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_OPTIONAL_LOCKS": "0"})
+        return env
+
+    def _git(self, *args: str, stdin: str | None = None, cwd: Path | None = None, check: bool = False) -> SandboxResult:
+        """A platform git call on the case, confined exactly like the test command (never the platform's environment,
+        never outside the network cut), with hooks and foreign config off. Output is not truncated: a diff is evidence."""
+        cmd = [*_GIT_HARDENED, *args]
+        r = self._exec(cmd, stdin=stdin, cwd=cwd, env=self._git_env())
+        if check and not r.ok:
+            raise subprocess.CalledProcessError(r.returncode, cmd, output=r.stdout, stderr=r.stderr)
+        return r
 
     # -- file helpers (paths are confined to the sandbox)
 
@@ -195,37 +234,32 @@ class LocalSandbox:
         p.write_text(content)
 
     def apply_diff(self, diff: str) -> SandboxResult:
-        r = subprocess.run(["git", "apply", "--whitespace=nowarn", "-"], cwd=self.path, input=diff,
-                           capture_output=True, text=True, env=self._env())
+        r = self._git("apply", "--whitespace=nowarn", "-", stdin=diff)
         if r.returncode != 0:
-            r = subprocess.run(["patch", "-p1", "--forward", "--batch"], cwd=self.path, input=diff,
-                               capture_output=True, text=True, env=self._env())
-        return SandboxResult(returncode=r.returncode, stdout=r.stdout, stderr=r.stderr)
+            r = self._exec(["patch", "-p1", "--forward", "--batch"], stdin=diff)
+        return SandboxResult(returncode=r.returncode, stdout=r.stdout, stderr=r.stderr, timed_out=r.timed_out)
 
     def commit(self, message: str) -> None:
         """Fold the current working-tree state into the sandbox baseline (so later `diff` excludes it)."""
-        git = ["git", "-c", "user.name=qudisclose", "-c", "user.email=qudisclose@localhost", "-C", str(self.path)]
-        subprocess.run([*git, "add", "-A"], check=True, capture_output=True)
-        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", message, "--no-gpg-sign"], check=True, capture_output=True)
+        self._git("add", "-A", check=True)
+        self._git("commit", "-q", "--allow-empty", "-m", message, "--no-verify", "--no-gpg-sign", check=True)
 
     def revision(self) -> str:
         """The git commit the case runs against (VSLA subject[1]); the baseline commit for a plain directory."""
-        r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.path, capture_output=True, text=True)
-        return r.stdout.strip() or "unknown"
+        return self._git("rev-parse", "HEAD").stdout.strip() or "unknown"
 
     def checkout(self, revision: str) -> bool:
         """Put the sandbox at `revision` (VSLA-P-4: re-execute at the subject revision). False if the commit is not in
         the repository this sandbox was created from, which the caller reports as `environment-error`."""
         if not re.fullmatch(r"[0-9a-f]{7,40}", revision or ""):
             return False
-        r = subprocess.run(["git", "checkout", "-q", "--detach", revision], cwd=self.path, capture_output=True, text=True)
+        r = self._git("checkout", "-q", "--detach", revision)
         return r.returncode == 0 and self.revision().startswith(revision)
 
     def diff(self) -> str:
-        if (self.path / ".git").exists() or (self.repo / ".git").exists():
-            r = subprocess.run(["git", "add", "-N", "."], cwd=self.path, capture_output=True, text=True)
-            r = subprocess.run(["git", "diff"], cwd=self.path, capture_output=True, text=True)
-            return r.stdout
+        if (self.path / ".git").exists():
+            self._git("add", "-N", ".")
+            return self._git("diff", "--no-ext-diff", "--no-textconv").stdout
         return ""
 
     def tree(self, max_files: int = 400) -> list[str]:

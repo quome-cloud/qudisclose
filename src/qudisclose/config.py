@@ -47,7 +47,7 @@ class HunterConfig(BaseModel):
 
 
 class SandboxConfig(BaseModel):
-    """Where the reproducer/patcher/hunter run untrusted code. `local` is a git worktree + rlimits +
+    """Where the reproducer/patcher/hunter run untrusted code. `local` is a per-case checkout (own `.git`) + rlimits +
     `unshare -n` on this host (default; the test path; VSLA isolation class `process`, a development convenience).
     `quome` runs each case in an isolated Quome sandbox VM (egress killswitch, east-west guard, metadata guard) over
     Quome's public API (isolation class `vm`, what VSLA-P-11 requires of a production intake); with a self-hosted

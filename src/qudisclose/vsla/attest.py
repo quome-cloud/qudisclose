@@ -61,7 +61,7 @@ def sandbox_digest(backend: str, isolation: str | None = None) -> dict[str, str]
 
 
 def sandbox_isolation(backend: str) -> str:
-    """VSLA-P-11 isolation class per backend: `process` for the local worktree backend (a development convenience), `vm` for Quome."""
+    """VSLA-P-11 isolation class per backend: `process` for the local backend (a development convenience), `vm` for Quome."""
     return "vm" if backend == "quome" else "process"
 
 
