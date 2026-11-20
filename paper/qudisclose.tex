@@ -278,6 +278,15 @@ to the same report type: GitHub private vulnerability reports and repository adv
 queries per package, and webhooks authenticated by an HMAC over a timestamp and the body with a five-minute
 window.
 
+\paragraph{Who can report.} The MCP intake is not an open door. A reporter's key and token are issued by the
+maintainer (\code{qudisclose register-reporter}) before its first report, so the signed, scoped path serves
+finders the project already knows. A stranger, which coordinated disclosure exists to serve, reports through
+GitHub's private vulnerability reporting, which any GitHub account can use and which the GitHub feed ingests.
+Those reports carry no signature and no \vsla{} statement, so they enter at \lvl{0} and are handled like any
+other report. They also do not pass the per-identity rate limit, which applies to MCP identities: each new
+report from the feed runs the full pipeline, model calls and sandboxed executions included. A cap per GitHub
+account and per day on feed-sourced cases is the obvious control and is not yet implemented.
+
 \subsection{The pipeline}
 \label{sec:pipeline}
 
